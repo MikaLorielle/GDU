@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Glass Drawing App</title>
+  <style>
+    :root {
+      --primary-color: rgba(255, 182, 193, 0.5);
+      --secondary-color: rgba(173, 216, 230, 0.5);
+      --glass-blur: blur(12px);
+      --text-color: #fff;
+      --bg-theme: linear-gradient(to right, #ff9a9e, #fad0c4, #fad0c4, #a1c4fd);
+    }
+    body { margin:0; overflow:hidden; height:100vh; background:var(--bg-theme); font-family:Segoe UI, sans-serif; }
+    .toolbar { position:absolute; top:1rem; left:1rem; display:flex; gap:.5rem; flex-wrap:wrap; z-index:10; }
+    .pill { padding:.4rem .8rem; border:none; border-radius:999px; cursor:pointer; transition:.3s; }
+    .pill:hover { opacity:.8; }
+    canvas { position:absolute; top:0; left:0; width:100vw; height:100vh; }
+    #drawCanvas { z-index:2; }
+    #glowCanvas { z-index:1; pointer-events:none; }
+    .glass { backdrop-filter:var(--glass-blur); -webkit-backdrop-filter:var(--glass-blur); 
+             background:linear-gradient(to br,var(--primary-color),var(--secondary-color));
+             border-radius:20px; padding:1rem; box-shadow:0 8px 32px rgba(31,38,135,0.37);
+             color:var(--text-color); }
+  </style>
+</head>
+<body>
+  <div class="toolbar glass">
+    <input type="color" id="colorPicker" class="pill" title="Custom Color"/>
+    <select id="paletteSelector" class="pill" title="Preset Palette">
+      <option value="#ff69b4">Neon Pink</option>
+      <option value="#00ffff">Cyan</option>
+      <option value="#ffff00">Yellow</option>
+      <option value="#00ff00">Lime</option>
+      <option value="#ffffff">White</option>
+    </select>
+    <input type="range" id="brushSize" min="1" max="100" value="10" class="pill" title="Brush Size"/>
+    <button id="eraserBtn" class="pill glass">Eraser: Off</button>
+    <button onclick="undo()" class="pill glass">Undo</button>
+    <button onclick="redo()" class="pill glass">Redo</button>
+    <button onclick="clearAll()" class="pill glass">Clear</button>
+    <button onclick="exportPNG()" class="pill glass">Export PNG</button>
+    <button onclick="saveJSON()" class="pill glass">Save JSON</button>
+    <input type="file" id="loadInput" accept=".json" class="pill" title="Load JSON"/>
+    <select id="themeSelector" class="pill" title="Theme">
+      <option value="default">Default</option>
+      <option value="night">Night</option>
+      <option value="aqua">Aqua</option>
+    </select>
+  </div>
+
+  <canvas id="glowCanvas"></canvas>
+  <canvas id="drawCanvas"></canvas>
+
+<script>
+  const drawCanvas = document.getElementById('drawCanvas');
+  const glowCanvas = document.getElementById('glowCanvas');
+  const liveCanvas = document.createElement('canvas');
+  liveCanvas.id = 'liveCanvas';
+  liveCanvas.style.cssText = `
+    position:absolute; top:0; left:0;
+    width:100vw; height:100vh;
+    pointer-events:none;
+    z-index:3;
+  `;
+  document.body.appendChild(liveCanvas);
+
+  const drawCtx = drawCanvas.getContext('2d');
+  const glowCtx = glowCanvas.getContext('2d');
+  const liveCtx = liveCanvas.getContext('2d');
+
+  const colorPicker    = document.getElementById('colorPicker');
+  const paletteSelector= document.getElementById('paletteSelector');
+  const brushSize      = document.getElementById('brushSize');
+  const eraserBtn      = document.getElementById('eraserBtn');
+  const loadInput      = document.getElementById('loadInput');
+  const themeSelector  = document.getElementById('themeSelector');
+
+  let drawing = false, isEraser = false;
+  let currentStroke = null;
+  const strokes = [], redoStack = [];
+
+  function resizeCanvas() {
+    [drawCanvas, glowCanvas, liveCanvas].forEach(c => {
+      c.width  = window.innerWidth;
+      c.height = window.innerHeight;
+    });
+    renderCommitted();
+  }
+  window.addEventListener('resize', resizeCanvas);
+  resizeCanvas();
+
+  function renderCommitted() {
+    drawCtx.clearRect(0,0,drawCanvas.width,drawCanvas.height);
+    glowCtx.clearRect(0,0,glowCanvas.width,glowCanvas.height);
+
+    for (const s of strokes) {
+      drawCtx.beginPath();
+      drawCtx.moveTo(...s.points[0]);
+      for (let i = 1; i < s.points.length; i++) {
+        drawCtx.lineTo(...s.points[i]);
+      }
+      drawCtx.lineCap = 'round';
+      drawCtx.lineJoin = 'round';
+      drawCtx.lineWidth = s.size;
+      drawCtx.globalCompositeOperation = s.eraser ? 'destination-out' : 'source-over';
+      drawCtx.strokeStyle = s.eraser ? 'rgba(0,0,0,1)' : s.color;
+      drawCtx.shadowColor = s.eraser ? 'transparent' : s.color;
+      drawCtx.shadowBlur  = s.eraser ? 0 : 15;
+      drawCtx.stroke();
+
+      if (!s.eraser) {
+        glowCtx.beginPath();
+        glowCtx.moveTo(...s.points[0]);
+        for (let i = 1; i < s.points.length; i++) {
+          glowCtx.lineTo(...s.points[i]);
+        }
+        glowCtx.lineCap = 'round';
+        glowCtx.lineJoin = 'round';
+        glowCtx.lineWidth = s.size * 2;
+        glowCtx.strokeStyle = s.color;
+        glowCtx.shadowColor = s.color;
+        glowCtx.shadowBlur  = s.size * 1.5;
+        glowCtx.globalAlpha = 0.2;
+        glowCtx.stroke();
+        glowCtx.globalAlpha = 1;
+      }
+    }
+  }
+
+  function undo() {
+    if (!strokes.length) return;
+    redoStack.push(strokes.pop());
+    renderCommitted();
+  }
+  function redo() {
+    if (!redoStack.length) return;
+    strokes.push(redoStack.pop());
+    renderCommitted();
+  }
+  function clearAll() {
+    strokes.length = redoStack.length = 0;
+    renderCommitted();
+  }
+
+  function exportPNG() {
+    const link = document.createElement('a');
+    link.href = drawCanvas.toDataURL('image/png');
+    link.download = 'drawing.png';
+    link.click();
+  }
+  function saveJSON() {
+    const blob = new Blob([JSON.stringify(strokes)], {type:'application/json'});
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = 'drawing.json';
+    link.click();
+  }
+  loadInput.onchange = e => {
+    const f = e.target.files[0];
+    if (!f) return;
+    const r = new FileReader();
+    r.onload = () => {
+      try {
+        const arr = JSON.parse(r.result);
+        strokes.length = redoStack.length = 0;
+        for (const s of arr) {
+          if (s.points?.length && s.color && s.size != null) strokes.push(s);
+        }
+        renderCommitted();
+      } catch {}
+    };
+    r.readAsText(f);
+  };
+
+  paletteSelector.onchange = e => colorPicker.value = e.target.value;
+  eraserBtn.onclick = () => {
+    isEraser = !isEraser;
+    eraserBtn.textContent = `Eraser: ${isEraser?'On':'Off'}`;
+  };
+  themeSelector.onchange = e => {
+    let bg;
+    if (e.target.value==='night') bg='linear-gradient(to right,#141e30,#243b55)';
+    else if (e.target.value==='aqua') bg='linear-gradient(to right,#13547a,#80d0c7)';
+    else bg='linear-gradient(to right,#ff9a9e,#fad0c4,#fad0c4,#a1c4fd)';
+    document.documentElement.style.setProperty('--bg-theme',bg);
+  };
+
+  function pointerDown(e) {
+    drawing = true;
+    const x = e.clientX, y = e.clientY, p = e.pressure||1;
+    currentStroke = {
+      points: [[x,y]],
+      color: colorPicker.value,
+      size: brushSize.value * p,
+      eraser: isEraser
+    };
+    redoStack.length = 0;
+  }
+  function pointerMove(e) {
+    if (!drawing) return;
+    const x = e.clientX, y = e.clientY;
+    currentStroke.points.push([x,y]);
+
+    liveCtx.clearRect(0,0,liveCanvas.width,liveCanvas.height);
+
+    liveCtx.beginPath();
+    liveCtx.moveTo(...currentStroke.points[0]);
+    for (let i=1; i<currentStroke.points.length; i++) {
+      liveCtx.lineTo(...currentStroke.points[i]);
+    }
+    liveCtx.lineCap = 'round'; liveCtx.lineJoin = 'round';
+    liveCtx.lineWidth = currentStroke.size;
+    liveCtx.globalCompositeOperation = currentStroke.eraser ? 'destination-out':'source-over';
+    liveCtx.strokeStyle = currentStroke.eraser ? 'rgba(0,0,0,1)' : currentStroke.color;
+    liveCtx.shadowColor = currentStroke.eraser ? 'transparent' : currentStroke.color;
+    liveCtx.shadowBlur  = currentStroke.eraser ? 0 : 15;
+    liveCtx.stroke();
+
+    if (!currentStroke.eraser) {
+      liveCtx.beginPath();
+      liveCtx.moveTo(...currentStroke.points[0]);
+      for (let i=1; i<currentStroke.points.length; i++) {
+        liveCtx.lineTo(...currentStroke.points[i]);
+      }
+      liveCtx.lineCap = 'round'; liveCtx.lineJoin = 'round';
+      liveCtx.lineWidth = currentStroke.size * 2;
+      liveCtx.strokeStyle = currentStroke.color;
+      liveCtx.shadowColor = currentStroke.color;
+      liveCtx.shadowBlur  = currentStroke.size * 1.5;
+      liveCtx.globalAlpha = 0.2;
+      liveCtx.stroke();
+      liveCtx.globalAlpha = 1;
+    }
+  }
+  function pointerUp() {
+    if (!drawing) return;
+    drawing = false;
+    strokes.push(currentStroke);
+    currentStroke = null;
+    liveCtx.clearRect(0,0,liveCanvas.width,liveCanvas.height);
+    renderCommitted();
+  }
+
+  drawCanvas.addEventListener('pointerdown', pointerDown);
+  drawCanvas.addEventListener('pointermove', pointerMove);
+  drawCanvas.addEventListener('pointerup',   pointerUp);
+  drawCanvas.addEventListener('pointerout',  pointerUp);
+</script>
+</body>
+</html>
